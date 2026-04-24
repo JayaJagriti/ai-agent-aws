@@ -3,18 +3,8 @@ from langgraph.graph import StateGraph, END
 from groq import Groq
 import os
 from duckduckgo_search import DDGS
-from dotenv import load_dotenv
-
-# ---------------- ENV ----------------
-load_dotenv()
 
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-
-# ---------------- MODELS ----------------
-MODEL_CANDIDATES = [
-    "llama-3.1-8b-instant",   # primary (fast + stable)
-    "qwen/qwen3-32b"         # fallback (better reasoning)
-]
 
 # ---------------- STATE ----------------
 class AgentState(TypedDict):
@@ -24,20 +14,12 @@ class AgentState(TypedDict):
     result: str
 
 
-# ---------------- LLM CALL (SAFE) ----------------
-def call_llm(messages):
-    for model in MODEL_CANDIDATES:
-        try:
-            res = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.3   # lower hallucination
-            )
-            return res.choices[0].message.content
-        except Exception:
-            continue
-
-    return "⚠️ LLM unavailable. Please try again."
+# ---------------- SMALL TALK ----------------
+def is_small_talk(query: str):
+    query = query.lower()
+    return any(word in query for word in [
+        "hi", "hello", "hey", "how are you", "what's up"
+    ])
 
 
 # ---------------- WEB SEARCH ----------------
@@ -45,76 +27,90 @@ def web_search(query):
     try:
         with DDGS(timeout=5) as ddgs:
             results = list(ddgs.text(query, max_results=2))
-
-        if results:
-            return results[0]["body"]
+            return results
     except:
-        return "Web search failed."
-
-    return "No relevant results found."
+        return []
 
 
-# ---------------- MAIN RAG NODE ----------------
+# ---------------- LLM ----------------
+def llm_node(state: AgentState):
+    messages = state.get("history", [])
+    messages.append({"role": "user", "content": state["query"]})
+
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=messages
+    )
+
+    return {"result": res.choices[0].message.content}
+
+
+# ---------------- RAG NODE ----------------
 def rag_node(state: AgentState):
     query = state["query"]
     retriever = state.get("retriever")
 
-    # 👉 STEP 1: Try RAG
+    # 👉 small talk → LLM
+    if is_small_talk(query):
+        return llm_node(state)
+
+    # 🔥 keyword boost for better retrieval
+    boosted_query = query + " company organization CEO COO role name PixelNerve team management"
+
+    # 👉 RAG first
     if retriever:
-        docs = retriever.invoke(query)
+        docs = retriever.invoke(boosted_query)
 
         if docs:
-            context = "\n".join([d.page_content[:300] for d in docs])
+            context = "\n".join([d.page_content for d in docs])
 
-            # 👉 ALWAYS try answering from context first
-            response = call_llm([
-                {
-                    "role": "system",
-                    "content": "Answer naturally using the provided context if relevant."
-                },
-                {
+            res = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{
                     "role": "user",
                     "content": f"""
+You MUST answer ONLY from the given context.
+
+STRICT RULES:
+- If answer is in context → answer clearly
+- If answer is NOT in context → reply EXACTLY: NOT_FOUND
+- DO NOT guess
+- DO NOT use outside knowledge
+
 Context:
 {context}
 
 Question:
 {query}
-
-Instructions:
-- If context contains answer → answer clearly
-- If partially relevant → try your best using it
-- If completely unrelated → say NOT_FOUND
 """
-                }
-            ])
+                }]
+            )
 
-            # 👉 ONLY fallback if clearly useless
-            if "NOT_FOUND" not in response and len(response.strip()) > 20:
-                return {"result": response}
+            answer = res.choices[0].message.content.strip()
 
-    # 👉 STEP 2: fallback (web + LLM)
+            # 👉 valid answer
+            if "NOT_FOUND" not in answer and len(answer) > 10:
+                return {"result": answer}
+
+    # 👉 WEB SEARCH FALLBACK
     web_result = web_search(query)
 
-    final_response = call_llm([
-        {
-            "role": "system",
-            "content": "You are a helpful assistant."
-        },
-        {
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{
             "role": "user",
             "content": f"""
-Web Info:
+Answer using this web result:
+
 {web_result}
 
 Question:
 {query}
 """
-        }
-    ])
+        }]
+    )
 
-    return {"result": final_response}
-   
+    return {"result": res.choices[0].message.content}
 
 
 # ---------------- GRAPH ----------------
