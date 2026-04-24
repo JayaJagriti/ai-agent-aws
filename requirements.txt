@@ -6,3 +6,4 @@ faiss-cpu
 groq
 python-dotenv
 duckduckgo-search
+langgraph
