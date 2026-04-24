@@ -2,6 +2,9 @@ import os
 import streamlit as st
 import time
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from agent import run_agent
 from rag import load_base_knowledge, add_user_pdf, get_retriever
 from memory import save_message, load_history, clear_history

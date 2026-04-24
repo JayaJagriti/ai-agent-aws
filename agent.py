@@ -9,7 +9,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # ---------------- STATE ----------------
 class AgentState(TypedDict):
     query: str
-    retriever: any
+    retriever: list   # 👈 now list of retrievers
     history: list
     result: str
 
@@ -17,63 +17,74 @@ class AgentState(TypedDict):
 # ---------------- SMALL TALK ----------------
 def is_small_talk(query: str):
     query = query.lower()
-    return any(word in query for word in [
-        "hi", "hello", "hey", "how are you", "what's up"
-    ])
+    small_talk_keywords = [
+        "hi", "hello", "hey", "how are you",
+        "what's up", "good morning", "good evening",
+        "who are you", "what can you do", "tell me a joke"
+    ]
+    return any(k in query for k in small_talk_keywords)
 
 
 # ---------------- WEB SEARCH ----------------
 def web_search(query):
     try:
         with DDGS(timeout=5) as ddgs:
-            results = list(ddgs.text(query, max_results=2))
-            return results
+            return list(ddgs.text(query, max_results=2))
     except:
         return []
-
-
-# ---------------- LLM ----------------
-def llm_node(state: AgentState):
-    messages = state.get("history", [])
-    messages.append({"role": "user", "content": state["query"]})
-
-    res = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=messages
-    )
-
-    return {"result": res.choices[0].message.content}
 
 
 # ---------------- RAG NODE ----------------
 def rag_node(state: AgentState):
     query = state["query"]
-    retriever = state.get("retriever")
+    retrievers = state.get("retriever", [])
 
-    # 👉 small talk → LLM
+    # ---------------- SMALL TALK ----------------
     if is_small_talk(query):
-        return llm_node(state)
+        res = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{
+                "role": "user",
+                "content": f"""
+You are a friendly AI assistant.
 
-    # 🔥 keyword boost for better retrieval
-    boosted_query = query + " company organization CEO COO role name PixelNerve team management"
+Respond casually, naturally, and briefly.
+Keep it human-like and engaging.
 
-    # 👉 RAG first
-    if retriever:
-        docs = retriever.invoke(boosted_query)
+User: {query}
+"""
+            }]
+        )
+        return {"result": res.choices[0].message.content}
 
-        if docs:
-            context = "\n".join([d.page_content for d in docs])
+    # ---------------- BOOST QUERY ----------------
+    boosted_query = query + " company organization CEO COO role name PixelNerve team meeting"
 
-            res = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
-                messages=[{
-                    "role": "user",
-                    "content": f"""
+    # ---------------- RETRIEVE FROM MULTIPLE DBS ----------------
+    docs = []
+
+    if retrievers:
+        # ✅ base first (important knowledge)
+        docs.extend(retrievers[0].invoke(boosted_query))
+
+        # ✅ user pdf next (optional)
+        if len(retrievers) > 1:
+            docs.extend(retrievers[1].invoke(boosted_query))
+
+    # ---------------- RAG ANSWER ----------------
+    if docs:
+        context = "\n".join([d.page_content for d in docs])
+
+        res = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{
+                "role": "user",
+                "content": f"""
 You MUST answer ONLY from the given context.
 
 STRICT RULES:
 - If answer is in context → answer clearly
-- If answer is NOT in context → reply EXACTLY: NOT_FOUND
+- If NOT → reply EXACTLY: NOT_FOUND
 - DO NOT guess
 - DO NOT use outside knowledge
 
@@ -83,16 +94,15 @@ Context:
 Question:
 {query}
 """
-                }]
-            )
+            }]
+        )
 
-            answer = res.choices[0].message.content.strip()
+        answer = res.choices[0].message.content.strip()
 
-            # 👉 valid answer
-            if "NOT_FOUND" not in answer and len(answer) > 10:
-                return {"result": answer}
+        if "NOT_FOUND" not in answer and len(answer) > 10:
+            return {"result": answer}
 
-    # 👉 WEB SEARCH FALLBACK
+    # ---------------- WEB FALLBACK ----------------
     web_result = web_search(query)
 
     res = client.chat.completions.create(
@@ -128,7 +138,7 @@ def run_agent(query, retriever=None, history=None):
 
     result = agent.invoke({
         "query": query,
-        "retriever": retriever,
+        "retriever": retriever or [],
         "history": history or []
     })
 
