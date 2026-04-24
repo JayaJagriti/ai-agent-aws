@@ -12,8 +12,8 @@ def create_db(pdf_path):
     documents = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=400,
-        chunk_overlap=50
+        chunk_size=800,
+        chunk_overlap=150
     )
 
     docs = splitter.split_documents(documents)
